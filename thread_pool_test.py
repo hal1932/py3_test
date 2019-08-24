@@ -28,10 +28,13 @@ class ImageItem(object):
         return self.__path
 
     @property
+    def image(self):
+        # type: () -> QImage
+        return self.__image
+
+    @property
     def pixmap(self):
         # type: () -> QPixmap
-        if self.__pixmap is None:
-            self.__pixmap = QPixmap(self.__image)
         return self.__pixmap
 
     def __init__(self, path):
@@ -41,6 +44,11 @@ class ImageItem(object):
         self.__path = path
         self.__image = QImage(path).scaled(100, 100)
         self.__pixmap = None
+
+    def convert_to_pixmap(self):
+        # type: () -> NoReturn
+        self.__pixmap = QPixmap(self.__image)
+        self.__image = None
 
 
 class ImageListView(QListView):
@@ -94,7 +102,7 @@ class ImageListModel(QAbstractListModel):
         self.endInsertRows()
 
     def clear(self):
-        self.__items.clear()
+        self.__items = []
 
     def rowCount(self, parent=QModelIndex()):
         return len(self.__items)
@@ -110,14 +118,14 @@ class ImageListModel(QAbstractListModel):
 
         item = self.__items[index.row()]
 
+        if role == Qt.ItemDataRole:
+            return item
+
         if role == Qt.DisplayRole:
             return item.name
-        elif role == Qt.DecorationRole:
-            return item.pixmap
-        elif role == Qt.ItemDataRole:
-            return item
-        elif role == Qt.UserRole:
-            return item.path
+
+        if role == Qt.DecorationRole:
+            return item.image
 
         return None
 
@@ -127,20 +135,25 @@ class ImageLoader(QObject):
     loaded = Signal(ImageItem)
     completed = Signal()
 
-    def __init__(self, directory):
-        # type: (str) -> NoReturn
+    def __init__(self, directory, thread_count=multiprocessing.cpu_count()):
+        # type: (str, int) -> NoReturn
         super(ImageLoader, self).__init__()
         self.__tasks_lock = threading.Lock()
-        self.__tasks = {}
-        self.__pool = multiprocessing.pool.ThreadPool(processes=20)
+        self.__tasks = {}  # type: Dict[str, multiprocessing.pool.AsyncResult]
+        self.__pool = multiprocessing.pool.ThreadPool(processes=thread_count)
         self.__directory = directory
 
-    def run(self):
+    def load_async(self):
         for path in glob.iglob(os.path.join(self.__directory, '*.png')):
-            task = self.__pool.apply_async(self.task_func, [path])
+            task = self.__pool.apply_async(self.__task_func, [path])
             self.__tasks[path] = task
 
-    def task_func(self, path):
+    def join(self):
+        tasks = list(self.__tasks.values())[:]
+        for task in tasks:
+            task.wait()
+
+    def __task_func(self, path):
         # type: (str) -> NoReturn
         item = ImageItem(path)
         self.loaded.emit(item)
@@ -164,13 +177,13 @@ class MainWindow(QWidget):
         area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         area.setWidgetResizable(True)
 
-        self.view = ImageListView()
-        self.model = ImageListModel()
-        self.view.setModel(self.model)
-        area.setWidget(self.view)
+        self.__view = ImageListView()
+        self.__model = ImageListModel()
+        self.__view.setModel(self.__model)
+        area.setWidget(self.__view)
 
         filter_text = QLineEdit()
-        filter_text.textChanged.connect(lambda: self.view.set_filter(filter_text.text()))
+        filter_text.textChanged.connect(lambda: self.__view.set_filter(filter_text.text()))
 
         button = QPushButton('run')
         button.clicked.connect(self.start)
@@ -181,29 +194,31 @@ class MainWindow(QWidget):
             area
         ))
 
+        self.__items = None  # type: List[ImageItem]
+
     def start(self):
-        self.items = []
+        self.__items = []
 
         loader = ImageLoader('C:/tmp/test_images')
         loader.loaded.connect(self.update)
         loader.completed.connect(self.complete)
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
-        loader.run()
+        loader.load_async()
 
     def update(self, item):
         # type: (ImageItem) -> NoReturn
         # self.model.append(item)
-        self.items.append(item)
+        self.__items.append(item)
 
     def complete(self):
+        self.__model.clear()
+        self.__model.extend(self.__items)
         QApplication.restoreOverrideCursor()
-        self.model.clear()
-        self.model.extend(self.items)
-        self.items.clear()
+        self.__items = None
 
 
-if __name__ == '__main__':
+def main():
     # from PIL import Image, ImageDraw, ImageFont
     #
     # font = ImageFont.truetype('C:/Windows/Fonts/consola.ttf', 500)
@@ -214,9 +229,31 @@ if __name__ == '__main__':
     #     draw.text((0, 0), index, font=font)
     #     img.save('C:/tmp/test_images/test_{}.png'.format(index))
 
-    app = QApplication(sys.argv)
+    # import time
+    # import gc
+    # for i in [1, 2, 4, 8, 12, 16, 20, 24, 28, 32]:
+    #     # print(i)
+    #     times = []
+    #     for _ in range(10):
+    #         loader = ImageLoader('C:/tmp/test_images', i)
+    #
+    #         gc.collect()
+    #         start = time.time()
+    #         loader.load_async()
+    #         loader.join()
+    #         times.append(time.time() - start)
+    #
+    #         del loader
+    #
+    #     print(sum(times) / 10)
+
+    # app = QApplication(sys.argv)
 
     window = MainWindow()
     window.show()
 
-    app.exec_()
+    # app.exec_()
+
+
+if __name__ == '__main__':
+    main()
